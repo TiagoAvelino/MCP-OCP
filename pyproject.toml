@@ -1,0 +1,12 @@
+[project]
+name = "basic-mcp"
+version = "0.1.0"
+description = "Getting start to MCP servers"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "mcp[cli]>=1.25.0",
+    "fastmcp",
+    "kubernetes",
+    "openai",
+]
