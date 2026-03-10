@@ -50,6 +50,11 @@ def _custom() -> client.CustomObjectsApi:
     return client.CustomObjectsApi()
 
 
+def _apps_v1() -> client.AppsV1Api:
+    _load_kube_auth()
+    return client.AppsV1Api()
+
+
 # -----------------------------
 # OpenShift helpers
 # -----------------------------
@@ -98,6 +103,41 @@ def _summarize_clusterversion(cv: Dict[str, Any]) -> str:
         lines.append(f"Message: {msg}")
 
     return "\n".join(lines)
+
+
+# -----------------------------
+# Pod helpers
+# -----------------------------
+_ERROR_PHASES = {"Failed", "Error", "Unknown"}
+_WAITING_ERROR_REASONS = {
+    "CrashLoopBackOff", "Error", "ImagePullBackOff", "ErrImagePull",
+    "CreateContainerError", "CreateContainerConfigError", "InvalidImageName",
+}
+
+
+def _pod_has_errors(pod: client.V1Pod) -> bool:
+    """Returns True if pod shows signs of problems (phase, restarts, container status)."""
+    if not pod.status:
+        return False
+    phase = pod.status.phase or ""
+    if phase in _ERROR_PHASES:
+        return True
+    restart_count = 0
+    for cs in (pod.status.container_statuses or []) if pod.status else []:
+        restart_count += getattr(cs, "restart_count", 0) or 0
+        if not getattr(cs, "ready", True):
+            return True
+        state = cs.state
+        if state:
+            if state.waiting:
+                reason = (state.waiting.reason or "").strip()
+                if reason in _WAITING_ERROR_REASONS:
+                    return True
+            if state.terminated:
+                exit_code = getattr(state.terminated, "exit_code", None)
+                if exit_code is not None and exit_code != 0:
+                    return True
+    return restart_count > 0
 
 
 # -----------------------------
@@ -173,6 +213,39 @@ def listar_nodes() -> str:
 
 
 @mcp.tool()
+def listar_pods(namespace: str) -> str:
+    """
+    Lists pods in a given namespace with basic info (name, status, restarts, age).
+    Pods with errors (Failed phase, restarts, CrashLoopBackOff, etc.) are marked with
+    '| HasErrors=True'. Filter that field if you need only problematic pods.
+    Args:
+        namespace: The Kubernetes namespace to list pods from (e.g. 'default', 'openshift-ingress')
+    """
+    try:
+        v1 = _core_v1()
+        pods = v1.list_namespaced_pod(namespace=namespace).items
+        out: List[str] = []
+        for p in pods:
+            name = p.metadata.name
+            phase = p.status.phase if p.status else "Unknown"
+            restart_count = 0
+            for c in (p.status.container_statuses or []) if p.status else []:
+                restart_count += c.restart_count
+            age = p.metadata.creation_timestamp
+            age_str = str(age) if age else "unknown"
+            has_errors = _pod_has_errors(p)
+            line = f"- {name} | Phase={phase} | Restarts={restart_count} | Created={age_str}"
+            if has_errors:
+                line += " | HasErrors=True"
+            out.append(line)
+        return "\n".join(out) if out else f"No pods found in namespace '{namespace}'."
+    except ApiException as e:
+        return f"Failed to list pods in '{namespace}': {e.status} {e.reason} - {e.body}"
+    except Exception as e:
+        return f"Failed to list pods in '{namespace}': {type(e).__name__}: {e}"
+
+
+@mcp.tool()
 def iniciar_upgrade_openshift(version: str, image: Optional[str] = None) -> str:
     """
     Starts an OpenShift cluster upgrade by setting ClusterVersion.spec.desiredUpdate.
@@ -200,6 +273,69 @@ def iniciar_upgrade_openshift(version: str, image: Optional[str] = None) -> str:
         return f"Failed to patch ClusterVersion: {e.status} {e.reason} - {e.body}"
     except Exception as e:
         return f"Failed to patch ClusterVersion: {type(e).__name__}: {e}"
+
+
+@mcp.tool()
+def definir_env_deployment(
+    deployment: str,
+    namespace: str,
+    env_vars: List[Dict[str, str]],
+) -> str:
+    """
+    Sets environment variables on a Deployment. Merges with existing env vars
+    (overwrites any with the same name). Applies to all containers in the deployment.
+    Args:
+        deployment: Name of the Deployment.
+        namespace: Kubernetes namespace containing the Deployment.
+        env_vars: List of env vars to set, each with 'name' and 'value' keys.
+                  Example: [{"name": "LOG_LEVEL", "value": "debug"}, {"name": "PORT", "value": "8080"}]
+    """
+    if not env_vars:
+        return "No env vars provided. Nothing to do."
+
+    # Validate and build V1EnvVar list
+    env_objs: List[client.V1EnvVar] = []
+    for ev in env_vars:
+        if not isinstance(ev, dict):
+            return f"Invalid env var entry (expected dict): {ev}"
+        name = ev.get("name")
+        value = ev.get("value")
+        if not name:
+            return f"Env var entry missing 'name' key: {ev}"
+        env_objs.append(client.V1EnvVar(name=name, value=str(value) if value is not None else ""))
+
+    try:
+        apps = _apps_v1()
+        dep = apps.read_namespaced_deployment(name=deployment, namespace=namespace)
+
+        if not dep.spec or not dep.spec.template or not dep.spec.template.spec or not dep.spec.template.spec.containers:
+            return f"Deployment '{deployment}' has no containers."
+
+        # Build merged env: existing by name, then overwrite/add from env_vars
+        env_by_name: Dict[str, client.V1EnvVar] = {}
+        for c in dep.spec.template.spec.containers:
+            for e in (c.env or []):
+                if e.name:
+                    env_by_name[e.name] = e
+        for e in env_objs:
+            env_by_name[e.name] = e
+
+        merged = list(env_by_name.values())
+
+        for c in dep.spec.template.spec.containers:
+            c.env = merged
+
+        apps.patch_namespaced_deployment(
+            name=deployment,
+            namespace=namespace,
+            body=dep,
+        )
+        names_set = ", ".join(e.name for e in env_objs)
+        return f"Env vars set on Deployment '{deployment}' in namespace '{namespace}': {names_set}"
+    except ApiException as e:
+        return f"Failed to set env vars: {e.status} {e.reason} - {e.body}"
+    except Exception as e:
+        return f"Failed to set env vars: {type(e).__name__}: {e}"
 
 
 if __name__ == "__main__":
