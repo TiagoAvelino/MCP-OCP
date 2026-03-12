@@ -276,6 +276,41 @@ def iniciar_upgrade_openshift(version: str, image: Optional[str] = None) -> str:
 
 
 @mcp.tool()
+def ver_logs_pod(
+    pod: str,
+    namespace: str,
+    container: Optional[str] = None,
+    tail_lines: Optional[int] = 100,
+    timestamps: bool = False,
+) -> str:
+    """
+    Retrieves the logs of a pod in the cluster.
+    Args:
+        pod: Name of the pod.
+        namespace: Kubernetes namespace containing the pod.
+        container: Optional container name (required if pod has multiple containers).
+        tail_lines: Number of lines to retrieve from the end of the log (default: 100).
+        timestamps: Include timestamps in each log line (default: False).
+    """
+    try:
+        v1 = _core_v1()
+        logs = v1.read_namespaced_pod_log(
+            name=pod,
+            namespace=namespace,
+            container=container,
+            tail_lines=tail_lines,
+            timestamps=timestamps,
+        )
+        if not logs:
+            return f"No logs returned for pod '{pod}' in namespace '{namespace}'."
+        return logs
+    except ApiException as e:
+        return f"Failed to get logs for pod '{pod}' in '{namespace}': {e.status} {e.reason} - {e.body}"
+    except Exception as e:
+        return f"Failed to get logs: {type(e).__name__}: {e}"
+
+
+@mcp.tool()
 def definir_env_deployment(
     deployment: str,
     namespace: str,
