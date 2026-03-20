@@ -36,14 +36,14 @@ O fluxo é simples: **Cliente (IA) → Servidor MCP → API do OpenShift**.
 
 ## 🔧 Ferramentas disponíveis
 
-| Ferramenta | Descrição |
-|------------|-----------|
-| `verificar_status_sistema` | Verifica status de cluster, API ou nodes (`cluster`, `api`, `nos`) |
-| `listar_nodes` | Lista nodes do cluster com nome, status Ready e versão do kubelet |
-| `listar_pods` | Lista pods em um namespace com fase, restarts e indicação de erros |
+| Ferramenta                  | Descrição                                                           |
+| --------------------------- | ------------------------------------------------------------------- |
+| `verificar_status_sistema`  | Verifica status de cluster, API ou nodes (`cluster`, `api`, `nos`)  |
+| `listar_nodes`              | Lista nodes do cluster com nome, status Ready e versão do kubelet   |
+| `listar_pods`               | Lista pods em um namespace com fase, restarts e indicação de erros  |
 | `iniciar_upgrade_openshift` | Inicia upgrade do cluster para uma versão específica (ex.: 4.14.25) |
-| `ver_logs_pod` | Obtém logs de um pod (com suporte a tail e timestamps) |
-| `definir_env_deployment` | Define variáveis de ambiente em um Deployment |
+| `ver_logs_pod`              | Obtém logs de um pod (com suporte a tail e timestamps)              |
+| `definir_env_deployment`    | Define variáveis de ambiente em um Deployment                       |
 
 ---
 

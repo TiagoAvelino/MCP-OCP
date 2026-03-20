@@ -14,8 +14,68 @@ The client (`client-gpt.py`) connects to your MCP server (`server-gpt.py`) and u
 
 2. **Set your API key** (optional - only if your endpoint requires authentication):
    - Environment variable: `export OPENAI_API_KEY=your-api-key-here`
-   - Command-line: `--api-key your-api-key-here`
+   - Or for Granite on OpenShift: `export GRANITE_API_TOKEN=...` and `export GRANITE_API_BASE=...`
+   - Command-line: `--api-key your-api-key-here` or `--api-key-file ./granite.token` (file contains one line: the JWT)
    - If your endpoint doesn't require auth, you can skip this
+
+### Running the Client with Granite 8b (OpenShift route + SA token)
+
+Use your inference **route** as the OpenAI-compatible base URL and the **service account JWT** as the bearer token. **Do not commit the token**; use env vars or a gitignored file.
+
+```bash
+export GRANITE_API_BASE="https://granite-8b-app-project.apps.cluster-x2gqr.x2gqr.sandbox1293.opentlc.com"
+export GRANITE_API_TOKEN="YOUR_JWT_HERE"
+export LLM_MODEL="granite-8b"   # optional; default is granite-8b if unset
+
+uv run python client-gpt.py server-gpt.py
+```
+
+Or with explicit flags:
+
+```bash
+uv run python client-gpt.py server-gpt.py \
+  --api-base "https://granite-8b-app-project.apps.cluster-x2gqr.x2gqr.sandbox1293.opentlc.com" \
+  --api-key-file ./granite.token \
+  --model granite-8b
+```
+
+If chat calls return **404**, your server may expect the base URL to include `/v1`:
+
+```bash
+export GRANITE_API_BASE="https://granite-8b-app-project.apps.cluster-x2gqr.x2gqr.sandbox1293.opentlc.com/v1"
+```
+
+See `docs/granite-client.env.example` for a template (no real secrets).
+
+### CrashLoop auto-remediation workflow (`--workflow remediate`)
+
+Uses MCP tools only (no LLM required unless `--remediate-use-llm`):
+
+1. `listar_pods_em_erro_cluster` → keep pods with **CrashLoop** in status  
+2. Skips **`openshift-*`** namespaces by default (use `--include-openshift-namespaces` to include). If several CrashLoop pods exist, **user namespaces are tried first** (sorted before `openshift-*`).  
+3. The MCP server lists pods with **API pagination** so large clusters don’t miss namespaces (e.g. only `openshift-storage` on the first page).  
+4. `ver_logs_pod` on the first selected pod  
+5. Parses logs for `environment variable NAME is not set` (and similar) → builds `env_vars`  
+6. Infers **Deployment** name from the pod name (`name-rs-hash-suffix` → `name`)  
+7. Calls `definir_env_deployment` **only** with **`--approve`** (or use **`--dry-run`** to preview)
+
+```bash
+export GRANITE_API_BASE="https://..."
+export GRANITE_API_TOKEN="..."
+
+# Preview
+uv run python client-gpt.py server-gpt.py --workflow remediate --dry-run
+
+# Apply env fix (writes to the cluster)
+uv run python client-gpt.py server-gpt.py --workflow remediate --approve
+```
+
+Optional:
+
+- `--remediate-namespace app-project --remediate-pod my-pod-xxx` — target one pod  
+- `--remediate-use-llm` — if regex finds nothing, ask the LLM for `{"env_vars":[...]}` JSON  
+
+Add more default env values in `client-gpt.py` → `_DEFAULT_ENV_FOR_MISSING`.
 
 ### Running the Client
 

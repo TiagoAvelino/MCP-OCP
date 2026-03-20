@@ -20,6 +20,53 @@ from openai import OpenAI
 TOOL_VERIFY_STATUS = "verificar_status_sistema"
 TOOL_LIST_NODES = "listar_nodes"
 TOOL_UPGRADE = "iniciar_upgrade_openshift"
+TOOL_LIST_PODS_ERROR = "listar_pods_em_erro_cluster"
+TOOL_VER_LOGS = "ver_logs_pod"
+TOOL_SET_ENV = "definir_env_deployment"
+
+# Remediation: default values when logs say "environment variable X is not set"
+_DEFAULT_ENV_FOR_MISSING: Dict[str, str] = {
+    "NAME": "OpenShift",
+    "LOG_LEVEL": "info",
+    "PORT": "8080",
+}
+
+_MISSING_ENV_RE = re.compile(
+    r"environment variable\s+['\"]?(\w+)['\"]?\s+is not set",
+    re.IGNORECASE,
+)
+_POD_LINE_RE = re.compile(
+    r"^-\s*(?P<ns>[^/\s]+)/(?P<pod>[^\s|]+)\s*\|\s*Status=(?P<status>[^|]+)",
+    re.MULTILINE,
+)
+
+# Default LLM model when using Granite on OpenShift (override with --model)
+DEFAULT_LLM_MODEL = "granite-8b"
+
+
+def _read_api_key_file(path: str) -> str:
+    with open(path, encoding="utf-8") as f:
+        return f.read().strip()
+
+
+def _resolve_llm_base_url(cli_base: Optional[str]) -> Optional[str]:
+    """
+    Order: --api-base, OPENAI_BASE_URL, GRANITE_API_BASE.
+    Trailing slash removed (OpenAI client appends /v1/...).
+    """
+    raw = cli_base or os.getenv("OPENAI_BASE_URL") or os.getenv("GRANITE_API_BASE")
+    if not raw:
+        return None
+    return raw.rstrip("/")
+
+
+def _resolve_llm_api_key(cli_key: Optional[str], key_file: Optional[str]) -> Optional[str]:
+    """
+    Order: --api-key-file (first line), --api-key, OPENAI_API_KEY, GRANITE_API_TOKEN.
+    """
+    if key_file:
+        return _read_api_key_file(key_file)
+    return cli_key or os.getenv("OPENAI_API_KEY") or os.getenv("GRANITE_API_TOKEN") or None
 
 
 # -----------------------------
@@ -279,25 +326,303 @@ No markdown. No code fences. No extra text.
 
 
 # -----------------------------
+# CrashLoop remediation agent (MCP + code logic, optional LLM)
+# -----------------------------
+def infer_deployment_from_pod_name(pod_name: str) -> str:
+    """
+    Pod name is usually {deployment}-{rs-hash}-{random}.
+    e.g. go-example-env-777f7cb945-x5kbc -> go-example-env
+    """
+    parts = pod_name.split("-")
+    if len(parts) >= 3:
+        return "-".join(parts[:-2])
+    return pod_name
+
+
+def parse_problem_pod_lines(
+    list_output: str,
+    *,
+    crashloop_only: bool = True,
+    include_openshift_namespaces: bool = False,
+    namespace_filter: Optional[str] = None,
+    pod_filter: Optional[str] = None,
+) -> List[tuple[str, str]]:
+    """Parse listar_pods_em_erro_cluster output -> [(namespace, pod_name), ...]."""
+    targets: List[tuple[str, str]] = []
+    for m in _POD_LINE_RE.finditer(list_output):
+        ns, pod, status = m.group("ns"), m.group("pod"), m.group("status").strip()
+        if namespace_filter and ns != namespace_filter:
+            continue
+        if pod_filter and pod != pod_filter:
+            continue
+        if not include_openshift_namespaces and ns.startswith("openshift-"):
+            continue
+        if crashloop_only and "crashloop" not in status.lower():
+            continue
+        targets.append((ns, pod))
+    # Prefer user / app namespaces over openshift-* when multiple CrashLoop pods exist
+    targets.sort(key=lambda t: (t[0].startswith("openshift-"), t[0], t[1]))
+    return targets
+
+
+def extract_env_fixes_from_logs(logs: str) -> List[Dict[str, str]]:
+    """Detect missing env vars from common crash messages (e.g. Go panic)."""
+    seen: set[str] = set()
+    out: List[Dict[str, str]] = []
+    for m in _MISSING_ENV_RE.finditer(logs):
+        name = m.group(1)
+        if name in seen:
+            continue
+        seen.add(name)
+        value = _DEFAULT_ENV_FOR_MISSING.get(name, "set-by-agent")
+        out.append({"name": name, "value": value})
+    return out
+
+
+def suggest_env_fixes_with_llm(
+    *,
+    openai_client: OpenAI,
+    model: str,
+    logs: str,
+) -> Optional[List[Dict[str, str]]]:
+    """
+    When regex finds nothing, ask the LLM for env vars as JSON.
+    Returns None on failure.
+    """
+    prompt = """You fix Kubernetes app crashes caused by missing configuration.
+
+Pod/container logs:
+---
+""" + logs[:8000] + """
+---
+
+If the fix is to set environment variables on the Deployment, reply with ONLY this JSON (no markdown):
+{"env_vars":[{"name":"VAR_NAME","value":"value"},...]}
+
+If you cannot suggest env vars, reply: {"env_vars":[]}
+"""
+    try:
+        resp = openai_client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2,
+        )
+        text = (resp.choices[0].message.content or "").strip()
+        obj = parse_json_object(text)
+        raw = obj.get("env_vars")
+        if not isinstance(raw, list):
+            return None
+        out: List[Dict[str, str]] = []
+        for item in raw:
+            if isinstance(item, dict) and item.get("name"):
+                out.append(
+                    {
+                        "name": str(item["name"]),
+                        "value": str(item.get("value", "")),
+                    }
+                )
+        return out
+    except Exception as e:
+        logger.warning("LLM env suggestion failed: %s", e)
+        return None
+
+
+async def run_crashloop_remediation(
+    client: Client,
+    args: argparse.Namespace,
+    openai_client: OpenAI,
+) -> None:
+    """
+    1) listar_pods_em_erro_cluster
+    2) filter CrashLoop (skip openshift-* unless flag)
+    3) ver_logs_pod
+    4) infer deployment + definir_env_deployment (needs --approve unless --dry-run)
+    """
+    print("\n=== Workflow: CrashLoop remediation (MCP + logic) ===\n")
+
+    try:
+        res = await client.call_tool(TOOL_LIST_PODS_ERROR, {})
+        raw = extract_text(res)
+    except Exception as e:
+        print(f"Failed to list problem pods: {e}")
+        return
+
+    print("Raw listing (filtered lines may apply):\n")
+    print(raw)
+    print()
+
+    # All CrashLoop pods from the listing (any namespace) — for diagnostics
+    all_crashloop = parse_problem_pod_lines(
+        raw,
+        crashloop_only=True,
+        include_openshift_namespaces=True,
+        namespace_filter=args.remediate_namespace,
+        pod_filter=args.remediate_pod,
+    )
+
+    targets = parse_problem_pod_lines(
+        raw,
+        crashloop_only=True,
+        include_openshift_namespaces=args.include_openshift_namespaces,
+        namespace_filter=args.remediate_namespace,
+        pod_filter=args.remediate_pod,
+    )
+
+    if not targets:
+        if not all_crashloop:
+            print("No CrashLoop pods found in the MCP listing. Check kube access / cluster state.")
+        else:
+            openshift_only = all(
+                ns.startswith("openshift-") for ns, _ in all_crashloop
+            )
+            if openshift_only and not args.include_openshift_namespaces:
+                print(
+                    "CrashLoop pod(s) are only in openshift-* namespaces right now. "
+                    "Your app namespace may be missing from the first API page — server was updated to paginate; "
+                    "retry after upgrading server-gpt.py. "
+                    "To remediate infra pods, run with: --include-openshift-namespaces"
+                )
+                print(f"Detected (openshift only): {all_crashloop}")
+            else:
+                print("No CrashLoop pods in scope after filters. Try adjusting --remediate-namespace / --remediate-pod.")
+        return
+
+    ns, pod = targets[0]
+    if len(targets) > 1:
+        print(f"Multiple targets ({len(targets)}); remediating first: {ns}/{pod}")
+        print("Others:", ", ".join(f"{n}/{p}" for n, p in targets[1:5]))
+        if len(targets) > 5:
+            print("...")
+    else:
+        print(f"Selected pod: {ns}/{pod}")
+
+    deployment = infer_deployment_from_pod_name(pod)
+    print(f"Inferred Deployment name: {deployment} (from pod name)")
+
+    try:
+        log_res = await client.call_tool(
+            TOOL_VER_LOGS,
+            {"pod": pod, "namespace": ns, "tail_lines": 120},
+        )
+        logs = extract_text(log_res)
+    except Exception as e:
+        print(f"Failed to read logs: {e}")
+        return
+
+    print("\n--- Pod logs (tail) ---\n")
+    print(logs)
+    print("\n--- End logs ---\n")
+
+    env_fixes = extract_env_fixes_from_logs(logs)
+    if not env_fixes and args.remediate_use_llm:
+        print("No regex match; trying LLM for env suggestions...")
+        env_fixes = suggest_env_fixes_with_llm(
+            openai_client=openai_client,
+            model=args.model,
+            logs=logs,
+        ) or []
+
+    if not env_fixes:
+        print(
+            "Could not derive env vars from logs (add patterns in extract_env_fixes_from_logs "
+            "or use --remediate-use-llm with a working LLM endpoint)."
+        )
+        return
+
+    print("Planned env patch:")
+    print(json.dumps(env_fixes, indent=2))
+
+    if args.dry_run:
+        print("\n--dry-run: not calling definir_env_deployment.")
+        return
+
+    if not args.approve:
+        print(
+            "\nRemediation applies a write (definir_env_deployment). "
+            "Re-run with --approve to execute, or use --dry-run to preview only."
+        )
+        return
+
+    try:
+        fix_res = await client.call_tool(
+            TOOL_SET_ENV,
+            {
+                "deployment": deployment,
+                "namespace": ns,
+                "env_vars": env_fixes,
+            },
+        )
+        print("\nRemediation result:")
+        print(extract_text(fix_res))
+    except Exception as e:
+        print(f"definir_env_deployment failed: {e}")
+
+
+# -----------------------------
 # Main agent loop
 # -----------------------------
 async def main() -> None:
     parser = argparse.ArgumentParser(description="MCP client with LLM coordination (OpenAI-compatible).")
     parser.add_argument("server_path", help="Path to your MCP server script (stdio). Example: ./mcp_openshift.py")
-    parser.add_argument("--model", default="llama-32-3b-instruct", help="Model name (e.g., llama-32-3b-instruct)")
+    parser.add_argument(
+        "--model",
+        default=os.getenv("LLM_MODEL", DEFAULT_LLM_MODEL),
+        help="Model name (default: env LLM_MODEL or granite-8b)",
+    )
     parser.add_argument("--objective", default="Assess cluster health and suggest safe next steps.", help="Goal for the coordinator.")
     parser.add_argument("--max-steps", type=int, default=15)
     parser.add_argument("--sleep", type=float, default=8.0, help="Seconds between iterations.")
     parser.add_argument("--approve", action="store_true", help="Allow write tools to run.")
-    parser.add_argument("--api-base", default=None, help="Custom API base URL (e.g., https://api.yourcompany.com/v1). Uses OPENAI_BASE_URL env var if not provided.")
-    parser.add_argument("--api-key", default=None, help="API key (optional). Uses OPENAI_API_KEY env var if not provided. Leave empty if endpoint doesn't require auth.")
+    parser.add_argument(
+        "--api-base",
+        default=None,
+        help="OpenAI-compatible API base URL. Env: OPENAI_BASE_URL or GRANITE_API_BASE.",
+    )
+    parser.add_argument(
+        "--api-key",
+        default=None,
+        help="Bearer token / API key. Env: OPENAI_API_KEY or GRANITE_API_TOKEN.",
+    )
+    parser.add_argument(
+        "--api-key-file",
+        default=None,
+        help="Read token from file (first line only). Safer than pasting in shell history.",
+    )
+    parser.add_argument(
+        "--workflow",
+        choices=("coordinator", "remediate"),
+        default="coordinator",
+        help="coordinator: LLM-driven loop. remediate: list CrashLoop pods, read logs, patch env via MCP.",
+    )
+    parser.add_argument(
+        "--include-openshift-namespaces",
+        action="store_true",
+        help="[remediate] Also consider pods in openshift-* (default: skip).",
+    )
+    parser.add_argument(
+        "--remediate-namespace",
+        default=None,
+        help="[remediate] Only pods in this namespace.",
+    )
+    parser.add_argument(
+        "--remediate-pod",
+        default=None,
+        help="[remediate] Only this pod name (with namespace via --remediate-namespace or single match).",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="[remediate] Plan only; do not call definir_env_deployment.",
+    )
+    parser.add_argument(
+        "--remediate-use-llm",
+        action="store_true",
+        help="[remediate] If logs do not match regex, ask LLM for env_vars JSON.",
+    )
     args = parser.parse_args()
 
-    # Get API key from arg or env (optional - some endpoints don't require auth)
-    api_key = args.api_key or os.getenv("OPENAI_API_KEY") or None
-
-    # Get base URL from arg or env (defaults to OpenAI's URL if not set)
-    api_base = args.api_base or os.getenv("OPENAI_BASE_URL")
+    api_key = _resolve_llm_api_key(args.api_key, args.api_key_file)
+    api_base = _resolve_llm_base_url(args.api_base)
 
     # Initialize OpenAI client with optional custom base URL and optional API key
     # Note: OpenAI SDK requires api_key parameter, but we can pass empty string for endpoints without auth
@@ -316,6 +641,10 @@ async def main() -> None:
     async with Client(args.server_path) as client:
         # FastMCP clients are async and used in an async context
         await client.ping()
+
+        if args.workflow == "remediate":
+            await run_crashloop_remediation(client, args, oai)
+            return
 
         tools_raw = await client.list_tools()
         tools_catalog = normalize_tools(tools_raw)

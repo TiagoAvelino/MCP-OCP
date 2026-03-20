@@ -8,3 +8,9 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Local LLM / API secrets (never commit)
+.env
+.env.local
+*.token
+granite.token

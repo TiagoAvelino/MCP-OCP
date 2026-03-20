@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, Optional, List
 
 from mcp.server.fastmcp import FastMCP
@@ -124,6 +125,12 @@ _WAITING_ERROR_REASONS = {
     "CreateContainerError", "CreateContainerConfigError", "InvalidImageName",
 }
 
+# Same intent as: oc get pods -A | grep -E 'Error|CrashLoop|ImagePull|ErrImage|Pending|Evicted|OOMKilled|CreateContainer'
+_PROBLEM_POD_STATUS_RE = re.compile(
+    r"Error|CrashLoop|ImagePull|ErrImage|Pending|Evicted|OOMKilled|CreateContainer",
+    re.IGNORECASE,
+)
+
 
 def _pod_has_errors(pod: client.V1Pod) -> bool:
     """Returns True if pod shows signs of problems (phase, restarts, container status)."""
@@ -148,6 +155,72 @@ def _pod_has_errors(pod: client.V1Pod) -> bool:
                 if exit_code is not None and exit_code != 0:
                     return True
     return restart_count > 0
+
+
+def _pod_status_text_for_grep(pod: client.V1Pod) -> str:
+    """Build a string resembling `oc get pods` STATUS + phase/reason for pattern matching."""
+    chunks: List[str] = []
+    if pod.status:
+        if pod.status.phase:
+            chunks.append(pod.status.phase)
+        if pod.status.reason:
+            chunks.append(pod.status.reason)
+        for cs in (pod.status.init_container_statuses or []) + (pod.status.container_statuses or []):
+            st = cs.state
+            if not st:
+                continue
+            if st.waiting and st.waiting.reason:
+                chunks.append(st.waiting.reason)
+            if st.terminated and st.terminated.reason:
+                chunks.append(st.terminated.reason)
+    return " ".join(chunks)
+
+
+def _pod_matches_oc_problem_grep(pod: client.V1Pod) -> bool:
+    text = _pod_status_text_for_grep(pod)
+    if _PROBLEM_POD_STATUS_RE.search(text):
+        return True
+    # Defensive: some API states omit reasons briefly; still catch known bad waiting states
+    for cs in (pod.status.container_statuses or []) if pod.status else []:
+        st = cs.state
+        if st and st.waiting and st.waiting.reason in _WAITING_ERROR_REASONS:
+            return True
+    return False
+
+
+def _list_all_pods_all_namespaces(v1: client.CoreV1Api) -> List[client.V1Pod]:
+    """
+    List every pod in all namespaces. Uses pagination — a single list call can truncate
+    results on large clusters (missing user namespaces while only openshift-* appears).
+    """
+    all_items: List[client.V1Pod] = []
+    _continue: Optional[str] = None
+    while True:
+        kwargs: Dict[str, Any] = {"limit": 500}
+        if _continue:
+            kwargs["_continue"] = _continue
+        resp = v1.list_pod_for_all_namespaces(**kwargs)
+        all_items.extend(resp.items or [])
+        meta = resp.metadata
+        _continue = getattr(meta, "_continue", None) if meta is not None else None
+        if not _continue:
+            break
+    return all_items
+
+
+def _pod_problem_status_summary(pod: client.V1Pod) -> str:
+    """Short human-readable status for listing (prefer first notable container state)."""
+    if not pod.status:
+        return "Unknown"
+    if pod.status.reason:
+        return pod.status.reason
+    for cs in (pod.status.init_container_statuses or []) + (pod.status.container_statuses or []):
+        st = cs.state
+        if st and st.waiting and st.waiting.reason:
+            return st.waiting.reason
+        if st and st.terminated and st.terminated.reason:
+            return st.terminated.reason
+    return pod.status.phase or "Unknown"
 
 
 # -----------------------------
@@ -253,6 +326,45 @@ def listar_pods(namespace: str) -> str:
         return f"Failed to list pods in '{namespace}': {e.status} {e.reason} - {e.body}"
     except Exception as e:
         return f"Failed to list pods in '{namespace}': {type(e).__name__}: {e}"
+
+
+@mcp.tool()
+def listar_pods_em_erro_cluster() -> str:
+    """
+    Lists pods across all namespaces whose status matches problematic states — same idea as:
+      oc get pods -A | grep -E 'Error|CrashLoop|ImagePull|ErrImage|Pending|Evicted|OOMKilled|CreateContainer'
+
+    Uses the Kubernetes API (list_pod_for_all_namespaces) and filters by phase, pod reason,
+    and container waiting/terminated reasons.
+    """
+    try:
+        v1 = _core_v1()
+        pods = _list_all_pods_all_namespaces(v1)
+        out: List[str] = []
+        for p in pods:
+            if not _pod_matches_oc_problem_grep(p):
+                continue
+            ns = p.metadata.namespace or "?"
+            name = p.metadata.name or "?"
+            phase = p.status.phase if p.status else "?"
+            summary = _pod_problem_status_summary(p)
+            restarts = 0
+            for c in (p.status.container_statuses or []) if p.status else []:
+                restarts += c.restart_count or 0
+            out.append(
+                f"- {ns}/{name} | Status={summary} | Phase={phase} | Restarts={restarts}"
+            )
+        if not out:
+            return (
+                "No pods matched problem filter across the cluster "
+                "(Error, CrashLoop, ImagePull, ErrImage, Pending, Evicted, OOMKilled, CreateContainer)."
+            )
+        header = f"Found {len(out)} pod(s) matching problem status filter (all namespaces):\n"
+        return header + "\n".join(out)
+    except ApiException as e:
+        return f"Failed to list pods cluster-wide: {e.status} {e.reason} - {e.body}"
+    except Exception as e:
+        return f"Failed to list pods cluster-wide: {type(e).__name__}: {e}"
 
 
 @mcp.tool()
