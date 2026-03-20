@@ -19,8 +19,9 @@ spec:
     spec:
       containers:
         - name: nginx
-          image: agent-console:latest
-          imagePullPolicy: IfNotPresent
+          # OpenShift internal registry (same namespace). Build with: oc start-build agent-console --from-dir=. --follow
+          image: image-registry.openshift-image-registry.svc:5000/remediation-app/agent-console:latest
+          imagePullPolicy: Always
           ports:
             - containerPort: 8080
               name: http

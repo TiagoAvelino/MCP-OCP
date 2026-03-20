@@ -1,0 +1,6 @@
+---
+# Optional. The deploy playbook uses `oc apply` / `kubectl apply` and does not require kubernetes.core.
+# Uncomment if you add tasks that use kubernetes.core.k8s:
+# collections:
+#   - name: kubernetes.core
+#     version: ">=3.0.0"

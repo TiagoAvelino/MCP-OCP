@@ -20,9 +20,9 @@ spec:
       serviceAccountName: remediation-api
       containers:
         - name: api
-          # Replace with your image (internal registry, Quay, etc.)
-          image: remediation-api:latest
-          imagePullPolicy: IfNotPresent
+          # OpenShift internal registry (same namespace). Build with: oc start-build remediation-api --from-dir=. --follow
+          image: image-registry.openshift-image-registry.svc:5000/remediation-app/remediation-api:latest
+          imagePullPolicy: Always
           ports:
             - containerPort: 8787
               name: http

@@ -1,0 +1,16 @@
+---
+# Target OpenShift project (replaces literal remediation-app in staged manifests)
+remediation_namespace: remediation-app
+
+# Default pull specs: OpenShift internal registry in the same namespace (after ansible substitution)
+remediation_api_image: image-registry.openshift-image-registry.svc:5000/remediation-app/remediation-api:latest
+agent_console_image: image-registry.openshift-image-registry.svc:5000/remediation-app/agent-console:latest
+
+# Patch deployment images after apply
+remediation_set_images: true
+
+# First deploy: set true to run oc start-build (internal registry), or run builds manually (see deploy/openshift/README.md)
+remediation_ocp_build: false
+
+# If rollout status fails with "progress deadline exceeded", set true once (or oc rollout restart …)
+remediation_rollout_restart: false

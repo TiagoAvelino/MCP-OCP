@@ -130,6 +130,7 @@ Isso abrirá uma interface no navegador onde você pode:
 - `CLIENT_USAGE.md` — Guia detalhado de uso do cliente
 - `CLIENT_WALKTHROUGH.md` — Passo a passo para configurar e testar o fluxo completo
 - **[`deploy/openshift/README.md`](deploy/openshift/README.md)** — Implantação no OpenShift (imagens, Services, Route, RBAC, nginx + SSE)
+- **[`deploy/ansible/README.md`](deploy/ansible/README.md)** — Ansible: aplicar tudo em `deploy/openshift` com `ansible-playbook`
 
 ---
 

@@ -1,0 +1,238 @@
+---
+# Deploy everything under deploy/openshift to OpenShift / Kubernetes.
+#
+# Prerequisites: Ansible + oc (or kubectl), logged-in context. Applies manifests via the CLI — no Python kubernetes package required.
+#
+#   cd deploy/ansible && ansible-playbook playbooks/deploy.yml
+#
+# Options:
+#   ansible-playbook playbooks/deploy.yml -e remediation_namespace=my-proj \
+#     -e remediation_api_image=quay.io/org/remediation-api:v1 \
+#     -e agent_console_image=quay.io/org/agent-console:v1
+#
+# First-time images (internal registry, no Quay): apply + binary builds + rollout
+#   ansible-playbook playbooks/deploy.yml -e remediation_ocp_build=true
+# Or build with podman (--tags build), push if needed, then deploy.
+#
+# hosts: localhost = machine where Ansible runs (your laptop or a bastion).
+# OpenShift is the *API target* via oc/kubectl + KUBECONFIG — workloads are not executed on localhost.
+#
+- name: Deploy remediation stack to OpenShift
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    # Defaults here so the playbook works even if group_vars/ is not loaded (e.g. run from another cwd without deploy/ansible/ansible.cfg).
+    remediation_namespace: remediation-app
+    # Default: OpenShift internal registry (see deploy/openshift BuildConfigs — no Docker Hub / Quay required)
+    remediation_api_image: image-registry.openshift-image-registry.svc:5000/remediation-app/remediation-api:latest
+    agent_console_image: image-registry.openshift-image-registry.svc:5000/remediation-app/agent-console:latest
+    remediation_set_images: true
+    # Set true once (or use oc start-build manually) to populate ImageStreams before pods can pull
+    remediation_ocp_build: false
+    # After on-cluster build, same image tag (:latest) needs a new rollout; also clears "progress deadline exceeded"
+    # from a previous failed rollout. Set true manually if rollout status fails immediately: -e remediation_rollout_restart=true
+    remediation_rollout_restart: false
+
+    openshift_manifest_dir: "{{ playbook_dir }}/../../openshift"
+    # ansible_env is unset when gather_facts: false; use env lookup (fallback /tmp for CI)
+    manifest_staging_dir: "{{ (lookup('env', 'HOME') | trim) or '/tmp' }}/.cache/ansible-basic-mcp-ocp"
+    basic_mcp_root: "{{ playbook_dir }}/../../.."
+    openshift_manifest_files:
+      - 00-namespace.yaml
+      - 10-serviceaccount.yaml
+      - 20-clusterrole.yaml
+      - 21-clusterrolebinding.yaml
+      - 25-imagestream-remediation-api.yaml
+      - 26-imagestream-agent-console.yaml
+      - 27-buildconfig-remediation-api.yaml
+      - 28-buildconfig-agent-console.yaml
+      - 30-service-remediation-api.yaml
+      - 31-deployment-remediation-api.yaml
+      - 40-service-agent-console.yaml
+      - 41-deployment-agent-console.yaml
+      - 50-route-agent-console.yaml
+
+  pre_tasks:
+    - name: Require oc or kubectl
+      ansible.builtin.command: bash -lc "command -v oc &>/dev/null && echo oc || command -v kubectl"
+      register: remediation_k8s_cli
+      changed_when: false
+
+    - name: Fail if no OpenShift/Kubernetes CLI
+      ansible.builtin.fail:
+        msg: "Install oc (OpenShift) or kubectl and ensure you are logged in (oc login / KUBECONFIG)."
+      when: remediation_k8s_cli.stdout | default('') | length == 0
+
+    - name: Set cluster CLI fact
+      ansible.builtin.set_fact:
+        remediation_oc: "{{ remediation_k8s_cli.stdout | trim }}"
+
+  tasks:
+    - name: Ensure staging directory for rendered manifests
+      ansible.builtin.file:
+        path: "{{ manifest_staging_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Stage OpenShift manifests (from deploy/openshift)
+      ansible.builtin.copy:
+        src: "{{ openshift_manifest_dir }}/{{ item }}"
+        dest: "{{ manifest_staging_dir }}/{{ item }}"
+        mode: "0644"
+      loop: "{{ openshift_manifest_files }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Replace default project name in staged files
+      ansible.builtin.replace:
+        path: "{{ manifest_staging_dir }}/{{ item }}"
+        regexp: remediation-app
+        replace: "{{ remediation_namespace }}"
+      loop: "{{ openshift_manifest_files }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Apply manifests (oc/kubectl apply — no Python kubernetes package required)
+      ansible.builtin.shell:
+        cmd: |
+          set -e
+          {% for f in openshift_manifest_files %}
+          {{ remediation_oc }} apply -f "{{ manifest_staging_dir }}/{{ f }}"
+          {% endfor %}
+        executable: /bin/bash
+      register: remediation_apply_all
+      changed_when: >-
+        'created' in remediation_apply_all.stdout
+        or 'configured' in remediation_apply_all.stdout
+
+    # Populate ImageStreams before rollout (internal registry — no Docker Hub)
+    - name: Build remediation-api ImageStream (oc start-build --from-dir)
+      ansible.builtin.command:
+        cmd: >-
+          {{ remediation_oc }} start-build remediation-api
+          --from-dir "{{ basic_mcp_root }}"
+          --follow
+          -n {{ remediation_namespace }}
+      when: remediation_ocp_build | bool
+      register: ocp_build_api
+      changed_when: ocp_build_api.rc == 0
+
+    - name: Build agent-console ImageStream (oc start-build --from-dir)
+      ansible.builtin.command:
+        cmd: >-
+          {{ remediation_oc }} start-build agent-console
+          --from-dir "{{ basic_mcp_root }}"
+          --follow
+          -n {{ remediation_namespace }}
+      when: remediation_ocp_build | bool
+      register: ocp_build_ui
+      changed_when: ocp_build_ui.rc == 0
+
+    - name: Set remediation-api container image
+      ansible.builtin.command:
+        cmd: >-
+          {{ remediation_oc }} set image deployment/remediation-api
+          api={{ remediation_api_image }}
+          -n {{ remediation_namespace }}
+      when: remediation_set_images | bool
+      register: set_img_api
+      changed_when: "'image updated' in set_img_api.stdout | lower or 'deployment.apps' in set_img_api.stdout"
+
+    - name: Set agent-console container image
+      ansible.builtin.command:
+        cmd: >-
+          {{ remediation_oc }} set image deployment/agent-console
+          nginx={{ agent_console_image }}
+          -n {{ remediation_namespace }}
+      when: remediation_set_images | bool
+      register: set_img_ui
+      changed_when: "'image updated' in set_img_ui.stdout | lower or 'deployment.apps' in set_img_ui.stdout"
+
+    # New image at same tag does not change the Deployment spec; restart forces pull + clears stuck Progressing=False.
+    - name: Rollout restart remediation-api (after build or when forced)
+      ansible.builtin.command:
+        cmd: "{{ remediation_oc }} rollout restart deployment/remediation-api -n {{ remediation_namespace }}"
+      when:
+        - remediation_set_images | bool
+        - (remediation_ocp_build | bool) or (remediation_rollout_restart | bool)
+      changed_when: true
+
+    - name: Rollout restart agent-console (after build or when forced)
+      ansible.builtin.command:
+        cmd: "{{ remediation_oc }} rollout restart deployment/agent-console -n {{ remediation_namespace }}"
+      when:
+        - remediation_set_images | bool
+        - (remediation_ocp_build | bool) or (remediation_rollout_restart | bool)
+      changed_when: true
+
+    - name: Wait for rollouts to complete
+      when: remediation_set_images | bool
+      block:
+        - name: Wait for remediation-api rollout
+          ansible.builtin.command:
+            cmd: "{{ remediation_oc }} rollout status deployment/remediation-api -n {{ remediation_namespace }} --timeout=600s"
+          changed_when: false
+
+        - name: Wait for agent-console rollout
+          ansible.builtin.command:
+            cmd: "{{ remediation_oc }} rollout status deployment/agent-console -n {{ remediation_namespace }} --timeout=600s"
+          changed_when: false
+
+      rescue:
+        - name: Show pod status (rollout diagnosis)
+          ansible.builtin.command:
+            cmd: "{{ remediation_oc }} get pods -n {{ remediation_namespace }} -o wide"
+          changed_when: false
+          failed_when: false
+
+        - name: Explain rollout failure
+          ansible.builtin.fail:
+            msg: |
+              Rollout did not finish in time (or Deployment was already failing).
+
+              If stderr was "exceeded its progress deadline", Kubernetes had already marked the last
+              rollout failed — `oc rollout status` then returns in about one second (it does not wait the full timeout).
+
+              Fix and re-run this playbook:
+                {{ remediation_oc }} rollout restart deployment/remediation-api deployment/agent-console -n {{ remediation_namespace }}
+              Or one-time: ansible-playbook ... -e remediation_rollout_restart=true
+
+              Check logs:
+                {{ remediation_oc }} logs deployment/remediation-api -n {{ remediation_namespace }} --tail=80
+                {{ remediation_oc }} describe pod -l app.kubernetes.io/name=remediation-api -n {{ remediation_namespace }}
+
+    - name: Get Route host (OpenShift only)
+      ansible.builtin.command:
+        cmd: "{{ remediation_oc }} get route agent-console -n {{ remediation_namespace }} -o jsonpath='{.spec.host}'"
+      register: remediation_route_host
+      changed_when: false
+      failed_when: false
+
+    - name: Show console URL
+      ansible.builtin.debug:
+        msg: "Open https://{{ remediation_route_host.stdout | trim }} (Route agent-console in {{ remediation_namespace }})"
+      when: remediation_route_host.rc == 0 and remediation_route_host.stdout | trim | length > 0
+
+    # --- Optional: build images with podman (ansible-playbook ... --tags build) ---
+    - name: Build remediation-api with podman
+      ansible.builtin.command:
+        cmd: >-
+          podman build -f deploy/openshift/Dockerfile.remediation-api
+          -t {{ remediation_api_image }}
+          .
+        chdir: "{{ basic_mcp_root }}"
+      tags: [build]
+      register: podman_build_api
+      changed_when: true
+
+    - name: Build agent-console with podman
+      ansible.builtin.command:
+        cmd: >-
+          podman build -f deploy/openshift/Dockerfile.agent-console
+          -t {{ agent_console_image }}
+          .
+        chdir: "{{ basic_mcp_root }}"
+      tags: [build]
+      register: podman_build_ui
+      changed_when: true

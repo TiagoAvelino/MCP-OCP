@@ -1,18 +1,20 @@
 # Build from repository root:
 #   podman build -f deploy/openshift/Dockerfile.remediation-api -t remediation-api:latest .
 #
+# Red Hat Universal Base Image (UBI 9 + Python 3.12).
 FROM registry.access.redhat.com/ubi9/python-312:latest
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     REMEDIATION_PROJECT_ROOT=/app \
-    PYTHONPATH=/app
+    PYTHONPATH=/app/remediation-api:/app
 
 WORKDIR /app/remediation-api
 
-# Monorepo pieces importable from /app
-COPY openshift_tool_handlers.py remediation_workflow.py /app/
-COPY remediation-api /app/remediation-api
+# Monorepo root files (must match REMEDIATION_PROJECT_ROOT in Deployment, default /app)
+COPY --chmod=0644 openshift_tool_handlers.py remediation_workflow.py /app/
+# 0755 required for directories: 0644 dirs are not traversable → "Could not import module app.main"
+COPY --chmod=0755 remediation-api /app/remediation-api
 
 RUN pip install --upgrade pip && \
     pip install \
@@ -20,9 +22,6 @@ RUN pip install --upgrade pip && \
     "uvicorn[standard]>=0.32.0" \
     "kubernetes>=28.0.0" \
     "openai>=1.0.0"
-
-# OpenShift: arbitrary UID runs as group 0
-RUN chgrp -R 0 /app && chmod -R g=u /app
 
 USER 1001
 

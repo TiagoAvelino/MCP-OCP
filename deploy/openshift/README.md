@@ -12,7 +12,7 @@ Browsers use a **single OpenShift Route** to **agent-console** only. The UI call
 ## Prerequisites
 
 - `oc` / `kubectl` and permission to create **ClusterRole** + **ClusterRoleBinding** (cluster admin or equivalent).
-- **Podman** or **Docker** to build images (or use OpenShift Builds).
+- **No public registry required**: manifests use the **OpenShift internal registry** in your project. Populate images with **`oc start-build`** (binary build) or **Podman** + push.
 
 ## RBAC scope (important)
 
@@ -24,26 +24,53 @@ The remediation workflow lists pods **cluster-wide** (`list_pod_for_all_namespac
 
 This is **broad**. To reduce blast radius you would need **code changes** to list only allowed namespaces and a **Role** per namespace instead of a ClusterRole.
 
-## Build images (from repository root)
+## Ansible automation
+
+From [`deploy/ansible/`](../ansible/README.md):
+
+```bash
+cd deploy/ansible
+ansible-playbook playbooks/deploy.yml
+```
+
+## Images (why not `docker.io/...:latest`?)
+
+Bare names like `agent-console:latest` resolve to **Docker Hub** (`docker.io/library/...`), which is wrong for this app and often returns **access denied**. The Deployments in this repo use the **cluster internal registry**:
+
+`image-registry.openshift-image-registry.svc:5000/<namespace>/remediation-api:latest`  
+`image-registry.openshift-image-registry.svc:5000/<namespace>/agent-console:latest`
+
+You must **build or push** those tags into your namespace’s **ImageStreams** before pods will start.
+
+### Option A — On-cluster builds (no Quay, no local Podman)
+
+Manifests include **ImageStreams** + **binary Docker BuildConfigs** ([27-buildconfig-remediation-api.yaml](27-buildconfig-remediation-api.yaml), [28-buildconfig-agent-console.yaml](28-buildconfig-agent-console.yaml)). From the **repository root**:
+
+```bash
+cd /path/to/basic-mcp
+oc project remediation-app   # or your namespace
+
+oc start-build remediation-api --from-dir=. --follow
+oc start-build agent-console --from-dir=. --follow
+```
+
+`--from-dir` uploads the directory; keep it lean (no huge `node_modules` if you can avoid it — the Dockerfiles run `npm ci` / `pip` inside the build).
+
+**Ansible:** after apply, run with `-e remediation_ocp_build=true` to execute the same `oc start-build` steps (see [`deploy/ansible/README.md`](../ansible/README.md)).
+
+### Option B — Podman locally, push to internal registry
 
 ```bash
 cd /path/to/basic-mcp
 
 podman build -f deploy/openshift/Dockerfile.remediation-api -t remediation-api:latest .
 podman build -f deploy/openshift/Dockerfile.agent-console -t agent-console:latest .
+
+oc registry login
+# push to image-registry.../remediation-app/...
 ```
 
-Push to a registry your cluster can pull (example internal registry after `oc registry login`):
-
-```bash
-export REGISTRY=$(oc get route default-route -n openshift-image-registry -o jsonpath='{.spec.host}' 2>/dev/null || true)
-# or quay.io/yourorg/...
-```
-
-Update image references in:
-
-- [31-deployment-remediation-api.yaml](31-deployment-remediation-api.yaml)
-- [41-deployment-agent-console.yaml](41-deployment-agent-console.yaml)
+Then ensure Deployment image names match what you pushed (same internal-registry pullspec as in the YAML).
 
 ## Install
 
@@ -54,7 +81,7 @@ Update image references in:
    # or: oc apply -f deploy/openshift/00-namespace.yaml
    ```
 
-2. Apply manifests (order is alphabetical):
+2. Apply manifests (numeric order in filenames; or apply the whole directory):
 
    ```bash
    oc apply -f deploy/openshift/
@@ -62,12 +89,7 @@ Update image references in:
 
    If you already created the project with `oc new-project`, you can skip or ignore `00-namespace.yaml`.
 
-3. Point Deployments at your images, e.g.:
-
-   ```bash
-   oc set image deployment/remediation-api api=image-registry.openshift-image-registry.svc:5000/remediation-app/remediation-api:latest -n remediation-app
-   oc set image deployment/agent-console nginx=image-registry.openshift-image-registry.svc:5000/remediation-app/agent-console:latest -n remediation-app
-   ```
+3. **Build images** (Option A or B above). Deployments already reference the internal registry; no `docker.io` pull.
 
 ## Verify
 
@@ -106,11 +128,12 @@ env:
 |--------|--------|
 | 502 / SSE cuts off | nginx `proxy_read_timeout`, API pod logs, Route idle timeout |
 | API `Forbidden` on pods | ClusterRoleBinding + ServiceAccount on `remediation-api` Deployment |
-| Image pull errors | ImageStream pull secrets / `imagePullPolicy` / registry path |
+| Image pull errors / `docker.io/... denied` | Do not use bare `:latest` on Docker Hub; build with `oc start-build` or push to internal registry; see **Images** above |
 | Permission denied in container | OpenShift SCC; images use non-root UIDs (8080 nginx, 1001 API) |
+| Build: `chgrp` / `chmod … Operation not permitted` on `/app` | Rootless cluster builds often block changing perms on context layers — use `COPY --chmod=…` (see Dockerfiles; needs Buildah 1.23+ / recent OCP) |
 
 ## Files
 
-- [Dockerfile.remediation-api](Dockerfile.remediation-api) — UBI9 Python, copies `openshift_tool_handlers.py`, `remediation_workflow.py`, `remediation-api/`
-- [Dockerfile.agent-console](Dockerfile.agent-console) — Node build + nginx alpine
+- [Dockerfile.remediation-api](Dockerfile.remediation-api) — `registry.access.redhat.com/ubi9/python-312`, copies `openshift_tool_handlers.py`, `remediation_workflow.py`, `remediation-api/`
+- [Dockerfile.agent-console](Dockerfile.agent-console) — `ubi9/nodejs-22` (build) + `ubi9/nginx-124` (runtime); no docker.io images
 - [nginx.conf](nginx.conf) — SPA `try_files`, `/api/remediation` proxy + SSE-friendly settings

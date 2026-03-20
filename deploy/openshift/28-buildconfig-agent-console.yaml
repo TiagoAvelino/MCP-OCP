@@ -1,0 +1,23 @@
+# Build on-cluster from your laptop (no Quay):
+#   cd /path/to/basic-mcp && oc start-build agent-console --from-dir=. --follow -n remediation-app
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: agent-console
+  namespace: remediation-app
+  labels:
+    app.kubernetes.io/name: agent-console
+    app.kubernetes.io/part-of: remediation-stack
+spec:
+  source:
+    type: Binary
+  strategy:
+    type: Docker
+    dockerStrategy:
+      dockerfilePath: deploy/openshift/Dockerfile.agent-console
+  output:
+    to:
+      kind: ImageStreamTag
+      name: agent-console:latest
+  triggers:
+    - type: ConfigChange

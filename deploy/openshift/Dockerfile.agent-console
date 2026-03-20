@@ -1,24 +1,26 @@
-# Build from repository root:
-#   podman build -f deploy/openshift/Dockerfile.agent-console -t agent-console:latest .
-#
-FROM docker.io/node:22-alpine AS build
-WORKDIR /src
-COPY agent-console/package.json agent-console/package-lock.json* ./
+FROM registry.access.redhat.com/ubi9/nodejs-22:latest AS build
+
+USER 0
+WORKDIR /opt/app-root/src
+
+COPY agent-console/package.json agent-console/package-lock.json ./
 RUN npm ci
+
 COPY agent-console/ ./
 RUN npm run build
 
-FROM docker.io/nginx:1.26-alpine
+# -----------------------------------------------------------------------------
+FROM registry.access.redhat.com/ubi9/nginx-124:latest
 
-COPY deploy/openshift/nginx.conf /etc/nginx/nginx.conf
+USER 0
 
-RUN chgrp -R 0 /etc/nginx/nginx.conf /var/cache/nginx /var/run /var/log/nginx /usr/share/nginx/html && \
-    chmod -R g=u /etc/nginx/nginx.conf /var/cache/nginx /var/run /var/log/nginx /usr/share/nginx/html && \
-    touch /var/run/nginx.pid && chgrp 0 /var/run/nginx.pid && chmod g=u /var/run/nginx.pid
+COPY --chmod=0644 deploy/openshift/nginx.conf /etc/nginx/nginx.conf
+COPY --from=build /opt/app-root/src/dist/ /usr/share/nginx/html/
 
-COPY --from=build /src/dist /usr/share/nginx/html
-
-USER 101
+# Prepare writable nginx runtime dirs for arbitrary UID on OpenShift
+RUN mkdir -p /var/cache/nginx /var/run/nginx /tmp/nginx && \
+    chgrp -R 0 /var/cache/nginx /var/run/nginx /tmp/nginx /usr/share/nginx/html /etc/nginx && \
+    chmod -R g=u /var/cache/nginx /var/run/nginx /tmp/nginx /usr/share/nginx/html /etc/nginx
 
 EXPOSE 8080
 

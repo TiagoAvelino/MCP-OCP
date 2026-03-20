@@ -1,0 +1,9 @@
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: remediation-api
+  namespace: remediation-app
+  labels:
+    app.kubernetes.io/name: remediation-api
+    app.kubernetes.io/part-of: remediation-stack
+spec: {}
