@@ -1,0 +1,8 @@
+# Optional: oc new-project remediation-app --display-name="Remediation UI"
+# Or apply this Namespace if your cluster allows it.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: remediation-app
+  labels:
+    app.kubernetes.io/part-of: remediation-stack

@@ -1,0 +1,19 @@
+# Cluster-wide: required because listar_pods_em_erro_cluster uses
+# list_pod_for_all_namespaces (pagination across every namespace).
+# To narrow scope you would need code changes to list only selected namespaces.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: remediation-api
+  labels:
+    app.kubernetes.io/part-of: remediation-stack
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "patch", "update"]

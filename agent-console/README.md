@@ -9,7 +9,7 @@ Minimal, enterprise-style React UI for an OpenShift troubleshooting agent.
 
 ## Run locally
 
-**Remediation (real CLI) + UI**
+**Remediation API + UI**
 
 Terminal 1 — FastAPI streamer (repo root’s sibling `remediation-api`):
 
@@ -49,7 +49,8 @@ Open http://localhost:5173 — expand “Mock agent demo”.
 
 Expected contract:
 
-- `POST /api/agent/run` → `{ "id": string }`
+- **Remediation:** `POST /api/remediation/execute` (JSON body with `approved`, optional `dry_run`, …) → `{ sessionId }`, then SSE `GET /api/remediation/stream/:sessionId`.
+- **Mock agent:** `POST /api/agent/run` → `{ "id": string }`
 - `GET /api/agent/status/:id` → `AgentRunResult` (see `src/types/agent.ts`)
 
 Vite proxies `/api` to `http://localhost:8080` in dev (`vite.config.ts`). Point `target` at your server or remove proxy and use `VITE_API_BASE`.

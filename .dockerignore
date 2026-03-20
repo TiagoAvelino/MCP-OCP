@@ -1,0 +1,16 @@
+# Build context: repository root (basic-mcp)
+.git
+**/.venv
+**/node_modules
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.mypy_cache
+**/*.egg-info
+.env
+.env.*
+!.env.example
+*.md
+!remediation-api/README.md
+.cursor
+terminals

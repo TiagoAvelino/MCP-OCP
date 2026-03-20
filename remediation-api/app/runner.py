@@ -11,6 +11,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List
 
+from .services.remediation_runner import execute_remediation_in_process
 from .session import RemediationSession
 
 _STEP_HINTS: List[tuple[re.Pattern, str]] = [
@@ -45,6 +46,77 @@ async def _maybe_step_from_line(session: RemediationSession, line: str) -> None:
                 }
             )
             break
+
+
+def _use_subprocess() -> bool:
+    return os.environ.get("REMEDIATION_USE_SUBPROCESS", "").lower() in ("1", "true", "yes")
+
+
+async def run_remediation_in_process_session(session: RemediationSession) -> None:
+    """Production path: shared remediation_workflow + openshift_tool_handlers in-process."""
+    await session.append_event({"type": "status", "state": "running", "timestamp": _ts()})
+    await session.append_event(
+        {
+            "type": "step",
+            "step": "listing_pods",
+            "status": "in_progress",
+            "message": "Starting in-process remediation (MCP tool handlers)…",
+            "timestamp": _ts(),
+        }
+    )
+    await _log(session, "info", "Executor: in-process (no uv run)")
+
+    async def emit(msg: str) -> None:
+        await _log(session, "info", msg)
+        await _maybe_step_from_line(session, msg)
+
+    try:
+        result = await execute_remediation_in_process(
+            approve=True,
+            dry_run=False,
+            emit=emit,
+        )
+    except Exception as e:
+        await _log(session, "error", f"{type(e).__name__}: {e}")
+        await session.append_event(
+            {
+                "type": "result",
+                "success": False,
+                "exitCode": -1,
+                "summary": str(e),
+                "timestamp": _ts(),
+            }
+        )
+        session.mark_done(False, -1)
+        await session.append_event({"type": "status", "state": "error", "timestamp": _ts()})
+        return
+
+    success = result.success
+    exit_code = 0 if success else 1
+    summary = result.summary
+
+    await session.append_event(
+        {
+            "type": "step",
+            "step": "completed",
+            "status": "completed" if success else "failed",
+            "message": summary[:500],
+            "timestamp": _ts(),
+        }
+    )
+    await session.append_event(
+        {
+            "type": "result",
+            "success": success,
+            "exitCode": exit_code,
+            "summary": summary,
+            "timestamp": _ts(),
+        }
+    )
+    session.mark_done(success, exit_code)
+    await session.append_event(
+        {"type": "status", "state": "success" if success else "error", "timestamp": _ts()}
+    )
 
 
 async def run_remediation_subprocess(session: RemediationSession) -> None:
@@ -144,3 +216,11 @@ async def run_remediation_subprocess(session: RemediationSession) -> None:
     await session.append_event(
         {"type": "status", "state": "success" if success else "error", "timestamp": _ts()}
     )
+
+
+async def run_remediation_job(session: RemediationSession) -> None:
+    """Default: in-process. Set REMEDIATION_USE_SUBPROCESS=1 for legacy uv-run CLI."""
+    if _use_subprocess():
+        await run_remediation_subprocess(session)
+    else:
+        await run_remediation_in_process_session(session)

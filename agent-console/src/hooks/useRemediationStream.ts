@@ -1,10 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  executeRemediation,
   fetchRemediationStatus,
   openRemediationStream,
-  startRemediation,
 } from "../services/remediationApi";
-import type { RemediationRunState, StreamEvent } from "../types/remediation";
+import {
+  REMEDIATION_STEP_LABELS,
+  type RemediationRunState,
+  type StreamEvent,
+  finalizeRemediationSteps,
+} from "../types/remediation";
 
 type StepMap = Record<string, "pending" | "in_progress" | "completed" | "failed">;
 
@@ -28,6 +33,7 @@ export function useRemediationStream() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const esRef = useRef<EventSource | null>(null);
   const finishedRef = useRef(false);
+  const lastStepDelimiterRef = useRef<string | null>(null);
   const logEndRef = useRef<HTMLDivElement | null>(null);
 
   const stopStream = useCallback(() => {
@@ -55,20 +61,36 @@ export function useRemediationStream() {
       if (!ev || typeof ev !== "object" || !("type" in ev)) return;
       switch (ev.type) {
         case "status":
-          setRunState(ev.state);
+          // Don't let a late "running" overwrite terminal state after `result`
+          setRunState((prev) => {
+            if (prev === "success" || prev === "error") return prev;
+            return ev.state;
+          });
           break;
         case "log":
           appendLog(ev.level, ev.message, ev.timestamp);
           break;
-        case "step":
+        case "step": {
+          if (ev.step !== lastStepDelimiterRef.current) {
+            lastStepDelimiterRef.current = ev.step;
+            const label = REMEDIATION_STEP_LABELS[ev.step] ?? ev.step;
+            appendLog(
+              "step_delimiter",
+              `──────── ${label} ────────`,
+              ev.timestamp,
+            );
+          }
           setSteps((s) => reduceStepMap(s, ev));
           break;
+        }
         case "result":
           setResult({
             success: ev.success,
             exitCode: ev.exitCode,
             summary: ev.summary,
           });
+          setRunState(ev.success ? "success" : "error");
+          setSteps((s) => finalizeRemediationSteps(s, ev.success));
           finishedRef.current = true;
           if (esRef.current) {
             esRef.current.close();
@@ -86,6 +108,7 @@ export function useRemediationStream() {
     if (runState === "running") return;
     stopStream();
     finishedRef.current = false;
+    lastStepDelimiterRef.current = null;
     setErrorMessage(null);
     setResult(null);
     setLogs([]);
@@ -94,7 +117,10 @@ export function useRemediationStream() {
     setSessionId(null);
 
     try {
-      const { sessionId: sid } = await startRemediation();
+      const { sessionId: sid } = await executeRemediation({
+        approved: true,
+        dry_run: false,
+      });
       setSessionId(sid);
       const es = openRemediationStream(
         sid,
@@ -126,6 +152,7 @@ export function useRemediationStream() {
   const reset = useCallback(() => {
     stopStream();
     finishedRef.current = false;
+    lastStepDelimiterRef.current = null;
     setRunState("idle");
     setLogs([]);
     setSteps({});

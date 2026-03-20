@@ -35,7 +35,10 @@ export function AgentConsolePage() {
         />
 
         <div className="grid gap-8 lg:grid-cols-2">
-          <RemediationTimeline steps={remediation.steps} />
+          <RemediationTimeline
+            steps={remediation.steps}
+            runState={remediation.runState}
+          />
           <RemediationLogPanel
             logs={remediation.logs}
             logEndRef={remediation.logEndRef}
@@ -45,6 +48,7 @@ export function AgentConsolePage() {
         <RemediationSummary
           result={remediation.result}
           runState={remediation.runState}
+          errorMessage={remediation.errorMessage}
         />
 
         <div className="flex justify-end">

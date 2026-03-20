@@ -32,8 +32,10 @@ VITE_REMEDIATION_API=https://your-api.example.com
 
 ## Flow
 
-1. `POST /api/remediation/start` → `sessionId`
+1. `POST /api/remediation/execute` with JSON body (e.g. `{ "approved": true, "dry_run": false }`) → `sessionId`
 2. `EventSource` → `GET /api/remediation/stream/{sessionId}`
 3. UI appends `log` events, updates `status` / `step`, shows `result` at end
+
+(`POST /api/remediation/start` remains for simple starts without an approval payload.)
 
 Ensure CORS on the API allows your UI origin (edit `remediation-api/app/main.py`).

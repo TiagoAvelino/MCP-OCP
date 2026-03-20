@@ -1,0 +1,31 @@
+# Build from repository root:
+#   podman build -f deploy/openshift/Dockerfile.remediation-api -t remediation-api:latest .
+#
+FROM registry.access.redhat.com/ubi9/python-312:latest
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    REMEDIATION_PROJECT_ROOT=/app \
+    PYTHONPATH=/app
+
+WORKDIR /app/remediation-api
+
+# Monorepo pieces importable from /app
+COPY openshift_tool_handlers.py remediation_workflow.py /app/
+COPY remediation-api /app/remediation-api
+
+RUN pip install --upgrade pip && \
+    pip install \
+    "fastapi>=0.115.0" \
+    "uvicorn[standard]>=0.32.0" \
+    "kubernetes>=28.0.0" \
+    "openai>=1.0.0"
+
+# OpenShift: arbitrary UID runs as group 0
+RUN chgrp -R 0 /app && chmod -R g=u /app
+
+USER 1001
+
+EXPOSE 8787
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8787"]

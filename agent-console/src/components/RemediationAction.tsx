@@ -11,11 +11,15 @@ export function RemediationAction({ onStart, disabled, isStarting }: Props) {
         <div>
           <h2 className="text-lg font-semibold text-rh-ink">Live remediation</h2>
           <p className="mt-1 text-sm text-rh-muted">
-            Runs{" "}
+            Sends{" "}
             <code className="rounded bg-rh-surface px-1.5 py-0.5 font-mono text-xs">
-              client-gpt.py --workflow remediate --approve
+              POST /api/remediation/execute
             </code>{" "}
-            on the API server. Logs stream via SSE.
+            with{" "}
+            <code className="rounded bg-rh-surface px-1.5 py-0.5 font-mono text-xs">
+              approved: true
+            </code>
+            . The API runs remediation in-process; logs stream via SSE.
           </p>
         </div>
         <button

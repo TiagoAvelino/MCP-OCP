@@ -52,12 +52,13 @@ See `docs/granite-client.env.example` for a template (no real secrets).
 Uses MCP tools only (no LLM required unless `--remediate-use-llm`):
 
 1. `listar_pods_em_erro_cluster` → keep pods with **CrashLoop** in status  
-2. Skips **`openshift-*`** namespaces by default (use `--include-openshift-namespaces` to include). If several CrashLoop pods exist, **user namespaces are tried first** (sorted before `openshift-*`).  
-3. The MCP server lists pods with **API pagination** so large clusters don’t miss namespaces (e.g. only `openshift-storage` on the first page).  
-4. `ver_logs_pod` on the first selected pod  
-5. Parses logs for `environment variable NAME is not set` (and similar) → builds `env_vars`  
-6. Infers **Deployment** name from the pod name (`name-rs-hash-suffix` → `name`)  
-7. Calls `definir_env_deployment` **only** with **`--approve`** (or use **`--dry-run`** to preview)
+2. **Application namespaces only** by default: skips **`default`**, **`kube-*`**, and **`openshift-*`** (unless `--include-openshift-namespaces`). Use **`--allow-system-namespaces`** to allow `default` / `kube-*` when auto-picking a pod, or pin **`--remediate-namespace`**.  
+3. If several CrashLoop pods exist in scope, **non-openshift** namespaces sort first (then `openshift-*`).  
+4. The MCP server lists pods with **API pagination** so large clusters don’t miss namespaces.  
+5. `ver_logs_pod` on the first selected pod  
+6. Parses logs for `environment variable NAME is not set` (and similar) → builds `env_vars`  
+7. Infers **Deployment** name from the pod name (`name-rs-hash-suffix` → `name`)  
+8. Calls `definir_env_deployment` **only** with **`--approve`** (or use **`--dry-run`** to preview)
 
 ```bash
 export GRANITE_API_BASE="https://..."
@@ -73,9 +74,10 @@ uv run python client-gpt.py server-gpt.py --workflow remediate --approve
 Optional:
 
 - `--remediate-namespace app-project --remediate-pod my-pod-xxx` — target one pod  
+- `--allow-system-namespaces` — allow auto-select in `default` / `kube-*` (still skips `openshift-*` unless `--include-openshift-namespaces`)  
 - `--remediate-use-llm` — if regex finds nothing, ask the LLM for `{"env_vars":[...]}` JSON  
 
-Add more default env values in `client-gpt.py` → `_DEFAULT_ENV_FOR_MISSING`.
+Add more default env values in `remediation_workflow.py` → `_DEFAULT_ENV_FOR_MISSING`.
 
 ### Running the Client
 

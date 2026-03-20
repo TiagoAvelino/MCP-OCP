@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-console
+  namespace: remediation-app
+  labels:
+    app.kubernetes.io/name: agent-console
+    app.kubernetes.io/part-of: remediation-stack
+spec:
+  selector:
+    app.kubernetes.io/name: agent-console
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+  type: ClusterIP

@@ -1,0 +1,19 @@
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: agent-console
+  namespace: remediation-app
+  labels:
+    app.kubernetes.io/name: agent-console
+    app.kubernetes.io/part-of: remediation-stack
+spec:
+  to:
+    kind: Service
+    name: agent-console
+    weight: 100
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+  wildcardPolicy: None
