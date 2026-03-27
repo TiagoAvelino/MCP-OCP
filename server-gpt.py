@@ -7,6 +7,7 @@ FastMCP server — registers tools implemented in openshift_tool_handlers.
 
 from __future__ import annotations
 
+from pathlib import Path
 import os
 from typing import Dict, List, Optional
 
@@ -86,6 +87,13 @@ def definir_env_deployment(
 ) -> str:
     """Sets environment variables on a Deployment (merged with existing)."""
     return h.definir_env_deployment(deployment, namespace, env_vars)
+
+
+@mcp.resource("docs://mcpreadme")
+def obter_mcpreadme() -> str:
+    """Returns the full docs/mcpreadme.md content for MCP clients."""
+    MCPREADME_PATH = Path(__file__).parent / "docs" / "mcpreadme.md"
+    return MCPREADME_PATH.read_text(encoding="utf-8")
 
 
 if __name__ == "__main__":
